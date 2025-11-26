@@ -1,0 +1,39 @@
+# Azure Functions
+local.settings.json
+bin/
+obj/
+.python_packages/
+__pycache__/
+.venv/
+.vscode/
+
+# PowerShell
+*.ps1xml
+
+# Node modules (for Azure Functions Core Tools)
+node_modules/
+
+# Build outputs
+*.zip
+*.tar.gz
+
+# IDE
+.idea/
+*.suo
+*.user
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp
