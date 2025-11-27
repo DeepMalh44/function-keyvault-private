@@ -1,6 +1,6 @@
-# Azure Function + Private Key Vault Setup
+# Azure Function + Private Key Vault - Certificate Rotation
 
-This repository contains scripts to deploy an Azure Function App with VNet integration that can access a private endpoint-enabled Key Vault for certificate rotation.
+This repository contains a complete solution to deploy an Azure Function App with VNet integration that can access a private endpoint-enabled Key Vault for certificate management and rotation.
 
 ## ✅ Supported Scenario
 
@@ -30,24 +30,181 @@ Unlike Azure Automation cloud jobs, **Azure Functions with VNet Integration CAN 
  └───────────────┘
 ```
 
-## Key Configuration
+## Key Features
 
 - **VNet Integration**: Function App's outbound traffic routes through the VNet
 - **Private Endpoint**: Key Vault is only accessible via private IP in the VNet
 - **Private DNS Zone**: Resolves Key Vault hostname to private IP
-- **Managed Identity**: Function authenticates to Key Vault without credentials
-- **RBAC**: Function has `Key Vault Certificates Officer` and `Key Vault Secrets Officer` roles
+- **Managed Identity**: Function authenticates to Key Vault AND Storage without credentials
+- **Identity-Based Storage**: No connection strings - uses `AzureWebJobsStorage__accountName` + `AzureWebJobsStorage__credential=managedidentity`
+- **RBAC Authorization**: Function has proper roles on both Key Vault and Storage Account
+
+## Quick Start
+
+### Prerequisites
+
+- Azure CLI installed and logged in (`az login`)
+- Azure Functions Core Tools v4 (`npm install -g azure-functions-core-tools@4`)
+- PowerShell 7.x
+
+### One-Command Deployment
+
+Deploy everything (infrastructure + function code) with a single command:
+
+```powershell
+cd function-keyvault-private
+.\deploy-function-keyvault-private.ps1
+```
+
+The script will:
+1. Create all Azure infrastructure
+2. Configure managed identity with proper RBAC roles
+3. Deploy the function code
+4. Wait for initialization
+5. Output the function key and test commands
+
+### Infrastructure Only
+
+If you only want to deploy infrastructure:
+
+```powershell
+.\deploy-function-keyvault-private.ps1 -SkipCodeDeployment
+```
+
+Then deploy code manually:
+
+```bash
+cd CertRotationFunction
+func azure functionapp publish func-kv-rotation-777 --powershell
+```
+
+## Testing the Function
+
+### Get Function Key
+
+```powershell
+# Get the function key
+$funcKey = az functionapp function keys list `
+    --resource-group rg-function-keyvault-demo-777 `
+    --name func-kv-rotation-777 `
+    --function-name RotateCertificate `
+    --query default -o tsv
+
+Write-Host "Function Key: $funcKey"
+```
+
+### Test Examples (PowerShell)
+
+```powershell
+# Set your function key
+$funcKey = "YOUR_FUNCTION_KEY_HERE"
+$baseUrl = "https://func-kv-rotation-777.azurewebsites.net/api/RotateCertificate"
+
+# 1. List all certificates
+Invoke-RestMethod -Uri "$baseUrl`?code=$funcKey&action=list"
+
+# 2. Create a new certificate
+Invoke-RestMethod -Uri "$baseUrl`?code=$funcKey&action=create&certificateName=my-test-cert" -Method Post
+
+# 3. Check certificate expiration status (default: 30 days)
+Invoke-RestMethod -Uri "$baseUrl`?code=$funcKey&action=check"
+
+# 4. Check with custom expiration threshold (e.g., 60 days)
+Invoke-RestMethod -Uri "$baseUrl`?code=$funcKey&action=check&daysBeforeExpiry=60"
+
+# 5. Rotate a specific certificate
+Invoke-RestMethod -Uri "$baseUrl`?code=$funcKey&action=rotate&certificateName=my-test-cert" -Method Post
+```
+
+### Test Examples (curl / Bash)
+
+```bash
+# Set your function key
+FUNC_KEY="YOUR_FUNCTION_KEY_HERE"
+BASE_URL="https://func-kv-rotation-777.azurewebsites.net/api/RotateCertificate"
+
+# 1. List all certificates
+curl "$BASE_URL?code=$FUNC_KEY&action=list"
+
+# 2. Create a new certificate
+curl -X POST "$BASE_URL?code=$FUNC_KEY&action=create&certificateName=my-test-cert"
+
+# 3. Check certificate expiration status
+curl "$BASE_URL?code=$FUNC_KEY&action=check"
+
+# 4. Check with custom expiration threshold
+curl "$BASE_URL?code=$FUNC_KEY&action=check&daysBeforeExpiry=60"
+
+# 5. Rotate a specific certificate
+curl -X POST "$BASE_URL?code=$FUNC_KEY&action=rotate&certificateName=my-test-cert"
+```
+
+### Expected Responses
+
+**List Certificates:**
+```json
+{
+  "action": "list",
+  "keyVault": "kv-func-777",
+  "certificates": [
+    {
+      "Name": "my-test-cert",
+      "Expires": "2026-11-26",
+      "DaysUntilExpiry": 364,
+      "Status": "OK",
+      "NeedsRotation": false
+    }
+  ],
+  "count": 1,
+  "success": true,
+  "message": "Found 1 certificate(s)",
+  "timestamp": "2025-11-26 23:45:00"
+}
+```
+
+**Create Certificate:**
+```json
+{
+  "action": "create",
+  "keyVault": "kv-func-777",
+  "certificate": {
+    "name": "my-test-cert",
+    "expires": "2026-11-26",
+    "subject": "CN=my-test-cert",
+    "thumbprint": "ABC123..."
+  },
+  "success": true,
+  "message": "Certificate 'my-test-cert' created successfully",
+  "timestamp": "2025-11-26 23:45:00"
+}
+```
+
+**Check Expiration:**
+```json
+{
+  "action": "check",
+  "keyVault": "kv-func-777",
+  "daysBeforeExpiry": 30,
+  "certificates": [...],
+  "expiringCount": 0,
+  "totalCount": 1,
+  "success": true,
+  "message": "Found 0 certificate(s) expiring within 30 days",
+  "timestamp": "2025-11-26 23:45:00"
+}
+```
 
 ## Files Structure
 
 ```
 function-keyvault-private/
-├── deploy-function-keyvault-private.ps1    # Deployment script
+├── deploy-function-keyvault-private.ps1    # Complete deployment script
 ├── README.md                                # This file
 └── CertRotationFunction/                    # Function App code
     ├── host.json                            # Function App configuration
     ├── requirements.psd1                    # PowerShell module dependencies
-    ├── profile.ps1                          # Startup script
+    ├── profile.ps1                          # Startup script (managed identity)
+    ├── local.settings.json                  # Local development settings
     ├── RotateCertificate/                   # HTTP-triggered function
     │   ├── function.json
     │   └── run.ps1
@@ -56,98 +213,115 @@ function-keyvault-private/
         └── run.ps1
 ```
 
-## Functions
+## Function Endpoints
 
 ### RotateCertificate (HTTP Trigger)
 
 Manual certificate operations via HTTP requests.
 
-**Actions:**
-- `list` - List all certificates in Key Vault
-- `check` - Check expiration status of all certificates
-- `rotate` - Rotate a specific certificate
-- `create` - Create a new self-signed certificate
-
-**Example Requests:**
-```bash
-# List all certificates
-curl "https://<function-app>.azurewebsites.net/api/RotateCertificate?action=list&code=<function-key>"
-
-# Check expiration status
-curl "https://<function-app>.azurewebsites.net/api/RotateCertificate?action=check&daysBeforeExpiry=30&code=<function-key>"
-
-# Rotate a certificate
-curl -X POST "https://<function-app>.azurewebsites.net/api/RotateCertificate?code=<function-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"action": "rotate", "certificateName": "my-cert"}'
-
-# Create a new certificate
-curl -X POST "https://<function-app>.azurewebsites.net/api/RotateCertificate?code=<function-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"action": "create", "certificateName": "new-cert"}'
-```
+| Action | Method | Parameters | Description |
+|--------|--------|------------|-------------|
+| `list` | GET | - | List all certificates in Key Vault |
+| `check` | GET | `daysBeforeExpiry` (optional, default: 30) | Check expiration status |
+| `create` | POST | `certificateName` (required) | Create new self-signed certificate |
+| `rotate` | POST | `certificateName` (required) | Rotate (renew) existing certificate |
 
 ### AutoRotateCertificates (Timer Trigger)
 
 Automated daily certificate rotation check.
 
-- **Schedule**: Daily at midnight (`0 0 0 * * *`)
+- **Schedule**: Daily at midnight UTC (`0 0 0 * * *`)
 - **Behavior**: Automatically rotates certificates expiring within 30 days
 - **Logging**: Full audit trail in Function App logs
 
-## Deployment
+## App Settings Reference
 
-### Prerequisites
+The deployment script configures these critical app settings:
 
-- Azure CLI installed and logged in
-- Azure Functions Core Tools (for local development)
-- PowerShell 7.x
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `AzureWebJobsStorage__accountName` | `stfunckv777` | Storage account name for identity-based access |
+| `AzureWebJobsStorage__credential` | `managedidentity` | Use managed identity for storage |
+| `KEY_VAULT_NAME` | `kv-func-777` | Key Vault name for certificate operations |
+| `WEBSITE_VNET_ROUTE_ALL` | `1` | Route all outbound traffic through VNet |
+| `WEBSITE_DNS_SERVER` | `168.63.129.16` | Azure DNS for private endpoint resolution |
 
-### Deploy Infrastructure
+**Important**: The `AzureWebJobsStorage` connection string is **removed** to ensure managed identity is used.
 
-```powershell
-cd function-keyvault-private
-.\deploy-function-keyvault-private.ps1
-```
+## RBAC Roles
 
-### Deploy Function Code
+The Function App's managed identity is assigned these roles:
 
-```bash
-cd CertRotationFunction
-func azure functionapp publish <function-app-name>
-```
+### On Storage Account
+| Role | Purpose |
+|------|---------|
+| Storage Blob Data Contributor | Function app content and managed dependencies |
+| Storage Queue Data Contributor | Function triggers and message processing |
+| Storage Table Data Contributor | Function state and checkpoint data |
+
+### On Key Vault
+| Role | Purpose |
+|------|---------|
+| Key Vault Secrets Officer | Read/write secrets |
+| Key Vault Certificates Officer | Create, read, rotate certificates |
 
 ## Resources Created
 
-| Resource | Description |
-|----------|-------------|
-| Resource Group | Container for all resources |
-| Virtual Network | With 2 subnets (function integration + private endpoints) |
-| Function App | PowerShell 7.4, Windows, Premium V2 plan |
-| App Service Plan | P1V2 (required for VNet integration) |
-| Storage Account | Required for Function App |
-| Key Vault | RBAC authorization, private endpoint only |
-| Private Endpoint | Connects Key Vault to VNet |
-| Private DNS Zone | Resolves Key Vault to private IP |
+| Resource | Name | Description |
+|----------|------|-------------|
+| Resource Group | `rg-function-keyvault-demo-777` | Container for all resources |
+| Virtual Network | `vnet-function-demo-777` | With 2 subnets |
+| Function App | `func-kv-rotation-777` | PowerShell 7.4, Windows |
+| App Service Plan | `asp-function-kv-777` | P1V2 (required for VNet) |
+| Storage Account | `stfunckv777` | Function App storage |
+| Key Vault | `kv-func-777` | RBAC auth, private only |
+| Private Endpoint | `pe-keyvault-777` | Key Vault private access |
+| Private DNS Zone | `privatelink.vaultcore.azure.net` | DNS resolution |
 
-## Important Notes
+## Troubleshooting
 
-### VNet Integration Requirements
+### Function Key Returns Error
 
-1. **Premium Plan Required**: VNet integration requires P1V2 or higher
-2. **Subnet Delegation**: Function integration subnet must be delegated to `Microsoft.Web/serverFarms`
-3. **Route All Traffic**: Set `WEBSITE_VNET_ROUTE_ALL=1` to route all outbound traffic through VNet
-4. **DNS Configuration**: Set `WEBSITE_DNS_SERVER=168.63.129.16` for Azure DNS resolution
+If getting the function key fails with "Bad Request":
 
-### Security Considerations
+1. **Wait longer**: Managed dependencies (Az.KeyVault, Az.Accounts) take 2-5 minutes to download on first start
+2. **Check app status**:
+   ```powershell
+   az functionapp show --resource-group rg-function-keyvault-demo-777 --name func-kv-rotation-777 --query "{state:state, availabilityState:availabilityState}"
+   ```
+3. **Restart the function app**:
+   ```powershell
+   az webapp restart --resource-group rg-function-keyvault-demo-777 --name func-kv-rotation-777
+   ```
 
-- ✅ Key Vault uses RBAC authorization (not access policies)
-- ✅ Key Vault public access is disabled
-- ✅ Function App uses Managed Identity (no stored credentials)
-- ✅ RBAC follows least-privilege principle
-- ✅ All traffic routed through VNet
-- ⚠️ Consider adding Private Endpoint for Storage Account in production
-- ⚠️ Enable Application Insights for monitoring
+### Function Can't Access Key Vault
+
+1. **Verify VNet Integration**:
+   ```powershell
+   az functionapp vnet-integration list --resource-group rg-function-keyvault-demo-777 --name func-kv-rotation-777
+   ```
+
+2. **Check RBAC roles**:
+   ```powershell
+   $principalId = az functionapp identity show --resource-group rg-function-keyvault-demo-777 --name func-kv-rotation-777 --query principalId -o tsv
+   az role assignment list --assignee $principalId --output table
+   ```
+
+3. **Verify DNS resolution** (from function logs):
+   - Key Vault should resolve to private IP (10.0.2.x)
+
+### Storage Access Issues
+
+Ensure these settings exist:
+```powershell
+az functionapp config appsettings list --resource-group rg-function-keyvault-demo-777 --name func-kv-rotation-777 --query "[?contains(name, 'AzureWebJobsStorage')]"
+```
+
+Should show:
+- `AzureWebJobsStorage__accountName` = `stfunckv777`
+- `AzureWebJobsStorage__credential` = `managedidentity`
+
+And should NOT show `AzureWebJobsStorage` (connection string).
 
 ## Local Development
 
@@ -161,23 +335,52 @@ func azure functionapp publish <function-app-name>
    az login
    ```
 
-3. Run locally:
+3. Create `local.settings.json` (for testing with public Key Vault):
+   ```json
+   {
+     "IsEncrypted": false,
+     "Values": {
+       "FUNCTIONS_WORKER_RUNTIME": "powershell",
+       "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+       "KEY_VAULT_NAME": "your-test-keyvault"
+     }
+   }
+   ```
+
+4. Run locally:
    ```bash
    cd CertRotationFunction
    func start
    ```
 
-Note: Local development cannot access private Key Vault. Use a test Key Vault with public access for local testing.
+**Note**: Local development cannot access private Key Vault. Use a test Key Vault with public access for local testing.
 
 ## Cleanup
 
-```bash
-az group delete --name rg-function-keyvault-demo --yes --no-wait
+```powershell
+# Delete the resource group and all resources
+az group delete --name rg-function-keyvault-demo-777 --yes --no-wait
+
+# Verify deletion
+az group show --name rg-function-keyvault-demo-777
 ```
+
+## Security Considerations
+
+- ✅ Key Vault uses RBAC authorization (not access policies)
+- ✅ Key Vault public access is disabled
+- ✅ Function App uses Managed Identity (no stored credentials)
+- ✅ Storage uses identity-based access (no connection strings)
+- ✅ RBAC follows least-privilege principle
+- ✅ All traffic routed through VNet
+- ⚠️ Consider adding Private Endpoint for Storage Account in production
+- ⚠️ Enable Application Insights for monitoring
 
 ## References
 
 - [Azure Functions VNet Integration](https://learn.microsoft.com/en-us/azure/azure-functions/functions-networking-options#virtual-network-integration)
 - [Key Vault Private Endpoints](https://learn.microsoft.com/en-us/azure/key-vault/general/private-link-service)
 - [Managed Identities for Azure Functions](https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity)
+- [Identity-Based Storage Connections](https://learn.microsoft.com/en-us/azure/azure-functions/functions-reference#connecting-to-host-storage-with-an-identity)
+- [Azure Functions App Settings Reference](https://learn.microsoft.com/en-us/azure/azure-functions/functions-app-settings)
 - [PowerShell Azure Functions](https://learn.microsoft.com/en-us/azure/azure-functions/functions-reference-powershell)
